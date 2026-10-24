@@ -1,0 +1,14 @@
+[gd_resource type="Resource" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://assetsimagecat/cat_appearance.gd" id="1"]
+[ext_resource type="Texture2D" path="res://assetsimagecat/blue_face.svg" id="2"]
+
+[resource]
+script = ExtResource("1")
+display_name = "BLUE"
+fur = Color(0.53, 0.61, 0.72, 1)
+shade = Color(0.37, 0.45, 0.58, 1)
+stripe = Color(0.31, 0.38, 0.50, 1)
+muzzle = Color(0.72, 0.78, 0.85, 1)
+ear = Color(0.76, 0.57, 0.68, 1)
+face = ExtResource("2")

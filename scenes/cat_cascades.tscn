@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/liquid_cat_lab.tscn" id="1"]
+
+[node name="CatCascades" instance=ExtResource("1")]
+initial_layout = 4
