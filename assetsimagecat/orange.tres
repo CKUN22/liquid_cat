@@ -8,5 +8,4 @@ display_name = "ORANGE"
 fur = Color(0.96, 0.68, 0.33, 1)
 shade = Color(0.80, 0.46, 0.22, 1)
 stripe = Color(0.72, 0.34, 0.16, 1)
-muzzle = Color(1, 0.88, 0.64, 1)
 striped = true

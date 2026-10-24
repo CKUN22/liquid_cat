@@ -24,6 +24,16 @@ var field := PackedFloat32Array()
 var material_x := PackedFloat32Array()
 var material_y := PackedFloat32Array()
 var material_coordinates := PackedVector2Array()
+var body_mask := PackedByteArray()
+var feature_mask := PackedByteArray()
+var body_sum := PackedInt32Array()
+var face_size := Vector2i(21, 13)
+var face_scale := 1.0
+var face_supported := false
+var _face_texture: Texture2D
+var _face_image: Image
+var _body_bounds := Rect2i()
+var _last_feature_center := Vector2.ZERO
 var image: Image
 var surface: ImageTexture
 var center := Vector2.ZERO
@@ -47,6 +57,9 @@ func _ready() -> void:
 	field.resize(WIDTH * HEIGHT)
 	material_x.resize(WIDTH * HEIGHT)
 	material_y.resize(WIDTH * HEIGHT)
+	body_mask.resize(WIDTH * HEIGHT)
+	feature_mask.resize(WIDTH * HEIGHT)
+	body_sum.resize((WIDTH + 1) * (HEIGHT + 1))
 	image = Image.create(WIDTH, HEIGHT, false, Image.FORMAT_RGBA8)
 	surface = ImageTexture.create_from_image(image)
 	reset(Vector2(96, 125))
@@ -65,6 +78,7 @@ func reset(origin: Vector2) -> void:
 	densities.resize(points.size())
 	center = _centroid()
 	face_position = center - Vector2(0, 2)
+	_last_feature_center = center
 	face_anchor = face_position
 	tail.clear()
 	for i in range(9):
@@ -247,21 +261,8 @@ func _shade_color() -> Color:
 	return Color("438da9") if water_mode else appearance.shade
 
 func _update_features(delta: float) -> void:
-	# Keep the face in a dense neighborhood near the mass center rather than
-	# letting it lag on a thin trailing strand after flowing through a channel.
-	var weighted := Vector2.ZERO
-	var weight := 0.0
-	var desired := center - Vector2(0, 3)
-	for p in points:
-		var w := exp(-p.distance_squared_to(desired) / 200.0)
-		weighted += p * w
-		weight += w
-	var target := weighted / maxf(weight, 0.001)
-	if target.distance_to(center) > 24:
-		target = center + (target - center).limit_length(24)
-	face_position = face_position.lerp(target, 1.0 - exp(-8.0 * delta))
-	face_position = center + (face_position - center).limit_length(12)
-	face_anchor = face_position.round()
+	# Face placement uses the current rendered body mask, below. The physical
+	# centroid can be in a wall or between separate pools and is not a face anchor.
 	var rightmost := points[0]
 	for p in points:
 		if p.x > rightmost.x:
@@ -275,6 +276,7 @@ func _render_surface() -> void:
 	field.fill(0)
 	material_x.fill(0)
 	material_y.fill(0)
+	body_mask.fill(0)
 	image.fill(Color.TRANSPARENT)
 	var lower := Vector2i(WIDTH - 1, HEIGHT - 1)
 	var upper := Vector2i.ZERO
@@ -294,8 +296,7 @@ func _render_surface() -> void:
 					material_y[cell] += contribution * material_coordinates[particle].y
 	lower = lower.clamp(Vector2i(1, 1), Vector2i(WIDTH - 2, HEIGHT - 2))
 	upper = upper.clamp(Vector2i(1, 1), Vector2i(WIDTH - 2, HEIGHT - 2))
-	var base_color := _fur_color()
-	var shadow_color := _shade_color()
+	# First build the real visible body, including holes and solid occlusion.
 	for y in range(lower.y, upper.y + 1):
 		for x in range(lower.x, upper.x + 1):
 			var index := y * WIDTH + x
@@ -308,12 +309,30 @@ func _render_surface() -> void:
 					break
 			if in_solid:
 				continue
+			body_mask[index] = 1
+	_select_face_anchor(lower, upper)
+	var base_color := _fur_color()
+	var shadow_color := _shade_color()
+	var coat_center := (Vector2(lower) + Vector2(upper)) * 0.5
+	var coat_extent := Vector2(upper - lower).max(Vector2(30, 25))
+	for y in range(lower.y, upper.y + 1):
+		for x in range(lower.x, upper.x + 1):
+			var index := y * WIDTH + x
+			if body_mask[index] == 0:
+				continue
 			var color := base_color
 			if appearance.striped:
-				var u := material_x[index] / field[index]
-				var v := material_y[index] / field[index]
+				# Fur always reconstructs its recognizable coat in body space.
+				# Fluid particle mixing must not permanently scramble its identity.
+				var u := (x - coat_center.x) * 54.0 / coat_extent.x
+				var v := (y - coat_center.y) * 48.0 / coat_extent.y
+				if water_mode:
+					u = material_x[index] / field[index]
+					v = material_y[index] / field[index]
 				if absf(u) > 9 and posmod(int(v + sin(u * 0.19) * 3), 11) < 3:
-					color = appearance.stripe.lerp(color, 0.65 if water_mode else 0.0)
+					var face_distance := Vector2((x - face_anchor.x) / maxf(face_size.x * 0.65, 1), (y - face_anchor.y) / maxf(face_size.y * 0.8, 1)).length()
+					var marking := smoothstep(0.85, 1.35, face_distance) if face_supported else 1.0
+					color = color.lerp(appearance.stripe, marking * (0.35 if water_mode else 1.0))
 			if field[index - 1] < 0.58 or field[index + 1] < 0.58 or field[index - WIDTH] < 0.58 or field[index + WIDTH] < 0.58:
 				color = INK
 			elif field[mini(field.size() - 1, index + WIDTH * 2)] < 0.58:
@@ -323,21 +342,133 @@ func _render_surface() -> void:
 			elif water_mode and posmod(x + int(elapsed * 10), 29) < 5 and posmod(y + int(sin(elapsed * 2) * 2), 11) == 0:
 				color = Color("b8f4ef")
 			image.set_pixel(x, y, color)
+	_paint_features()
 	surface.update(image)
 
-func _ear(x: float) -> void:
-	var top := HEIGHT * 1.0
-	for p in points:
-		if absf(p.x - x) < 8:
-			top = minf(top, p.y - 4)
-	if top > HEIGHT - 1:
+func _face_rect(anchor: Vector2i, size: Vector2i, padding: int) -> Rect2i:
+	return Rect2i(anchor - Vector2i(size.x / 2, size.y / 2) - Vector2i.ONE * padding, size + Vector2i.ONE * padding * 2)
+
+func _covered(rect: Rect2i) -> bool:
+	if rect.position.x < 1 or rect.position.y < 1 or rect.end.x >= WIDTH or rect.end.y >= HEIGHT:
+		return false
+	if not _body_bounds.encloses(rect):
+		return false
+	var stride := WIDTH + 1
+	var filled := body_sum[rect.end.y * stride + rect.end.x] - body_sum[rect.position.y * stride + rect.end.x] - body_sum[rect.end.y * stride + rect.position.x] + body_sum[rect.position.y * stride + rect.position.x]
+	return filled == rect.size.x * rect.size.y
+
+func _select_face_anchor(lower: Vector2i, upper: Vector2i) -> void:
+	# Summed area queries require the entire face AND its fur margin to exist.
+	var tracking_position := face_position + center - _last_feature_center
+	_last_feature_center = center
+	body_sum.fill(0)
+	_body_bounds = Rect2i(lower, upper - lower + Vector2i.ONE)
+	for y in range(lower.y, upper.y + 1):
+		var row := 0
+		for x in range(lower.x, upper.x + 1):
+			row += body_mask[y * WIDTH + x]
+			body_sum[(y + 1) * (WIDTH + 1) + x + 1] = body_sum[y * (WIDTH + 1) + x + 1] + row
+	var remaining := body_mask.duplicate()
+	var largest := PackedInt32Array()
+	for y in range(lower.y, upper.y + 1):
+		for x in range(lower.x, upper.x + 1):
+			var seed := y * WIDTH + x
+			if remaining[seed] == 0:
+				continue
+			var component := PackedInt32Array([seed])
+			remaining[seed] = 0
+			var head := 0
+			while head < component.size():
+				var cell := component[head]
+				head += 1
+				for neighbor in [cell - 1, cell + 1, cell - WIDTH, cell + WIDTH]:
+					if remaining[neighbor] != 0:
+						remaining[neighbor] = 0
+						component.append(neighbor)
+			if component.size() > largest.size():
+				largest = component
+	feature_mask.fill(0)
+	for cell in largest:
+		feature_mask[cell] = 1
+	face_supported = false
+	# A shallow puddle needs a smaller face, not a detached rectangular head.
+	for scale_value in [1.0, 0.85, 0.7, 0.55, 0.4, 0.25, 0.16]:
+		var size := Vector2i(maxi(3, roundi(21 * scale_value)), maxi(2, roundi(13 * scale_value)))
+		var padding := 2 if scale_value >= 0.4 else 1
+		var best_score := INF
+		var best := Vector2i.ZERO
+		for cell in largest:
+			var candidate := Vector2i(cell % WIDTH, cell / WIDTH)
+			if not _covered(_face_rect(candidate, size, padding)):
+				continue
+			var score := Vector2(candidate).distance_squared_to(center - Vector2(0, 3)) * 0.3 + Vector2(candidate).distance_squared_to(tracking_position) * 0.7
+			if score < best_score:
+				best_score = score
+				best = candidate
+		if best_score < INF:
+			face_anchor = Vector2(best)
+			face_position = face_anchor
+			face_size = size
+			face_scale = scale_value
+			face_supported = true
+			return
+
+func _solid_pixel(pixel: Vector2i) -> bool:
+	for polygon in obstacles:
+		if Geometry2D.is_point_in_polygon(Vector2(pixel), polygon):
+			return true
+	return false
+
+func _paint_ear(x: int) -> void:
+	var top := int(face_anchor.y)
+	while top > 1 and feature_mask[top * WIDTH + x] != 0:
+		top -= 1
+	var scale_value := maxf(face_scale, 0.4)
+	var base := Vector2(x, top + 3 * scale_value)
+	var tip := base + Vector2(-1, -12) * scale_value
+	var triangle := PackedVector2Array([base + Vector2(-6, 2) * scale_value, tip, base + Vector2(6, 2) * scale_value])
+	for y in range(maxi(1, floori(tip.y)), mini(HEIGHT - 1, ceili(base.y + 3))):
+		for px in range(maxi(1, floori(base.x - 6 * scale_value)), mini(WIDTH - 1, ceili(base.x + 6 * scale_value + 1))):
+			var pixel := Vector2i(px, y)
+			if _solid_pixel(pixel) or not Geometry2D.is_point_in_polygon(Vector2(pixel), triangle):
+				continue
+			var color := _fur_color()
+			var edge := minf(Geometry2D.get_closest_point_to_segment(Vector2(pixel), triangle[0], tip).distance_to(Vector2(pixel)), Geometry2D.get_closest_point_to_segment(Vector2(pixel), tip, triangle[2]).distance_to(Vector2(pixel)))
+			if edge < 0.8:
+				color = INK
+			elif y > tip.y + 4 * scale_value and y < base.y and absf(px - x) < 2 * scale_value:
+				color = Color("b8f4ef") if water_mode else appearance.ear
+			image.set_pixel(px, y, color)
+
+func _paint_features() -> void:
+	if not face_supported:
 		return
-	var base := Vector2(roundf(x), roundf(top + 5))
-	var tip := _collide(base + Vector2(-2, -13)).round()
-	var vertices := PackedVector2Array([base + Vector2(-7, 2), tip, base + Vector2(6, 1)])
-	draw_colored_polygon(vertices, _fur_color())
-	draw_polyline(PackedVector2Array([vertices[0], vertices[1], vertices[2]]), INK, 1.0)
-	draw_colored_polygon(PackedVector2Array([base + Vector2(-3, 0), tip + Vector2(0, 5), base + Vector2(2, 0)]), Color("b8f4ef") if water_mode else appearance.ear)
+	_paint_ear(roundi(face_anchor.x - face_size.x * 0.45))
+	_paint_ear(roundi(face_anchor.x + face_size.x * 0.45))
+	if _face_texture != appearance.face:
+		_face_texture = appearance.face
+		_face_image = _face_texture.get_image()
+		if _face_image.is_compressed():
+			_face_image.decompress()
+	var origin := Vector2i(face_anchor) - Vector2i(face_size.x / 2, face_size.y / 2)
+	for y in face_size.y:
+		for x in face_size.x:
+			var source := Vector2i(mini(20, int((x + 0.5) * 21 / face_size.x)), mini(12, int((y + 0.5) * 13 / face_size.y)))
+			var color := _face_image.get_pixelv(source)
+			if fmod(elapsed, 4.4) > 4.24 and source.y < 7:
+				color.a = 0
+				if source.y == 4 and (source.x >= 3 and source.x <= 5 or source.x >= 15 and source.x <= 17):
+					color = INK
+			if color.a > 0:
+				var pixel := origin + Vector2i(x, y)
+				image.set_pixelv(pixel, image.get_pixelv(pixel).lerp(color, color.a))
+	# Forehead markings are clipped to real fur, just like the face pixels.
+	if appearance.striped:
+		for mark in range(-1, 2):
+			for step in range(3):
+				var pixel := Vector2i(face_anchor) + Vector2i(roundi(mark * (4 - step * 0.5) * face_scale), -face_size.y / 2 - 2 + step)
+				if pixel.x > 0 and pixel.x < WIDTH and pixel.y > 0 and pixel.y < HEIGHT and body_mask[pixel.y * WIDTH + pixel.x] != 0:
+					image.set_pixelv(pixel, appearance.stripe)
 
 func _draw() -> void:
 	if surface == null:
@@ -350,18 +481,6 @@ func _draw() -> void:
 			tail_color = appearance.stripe.lerp(tail_color, 0.65 if water_mode else 0)
 		draw_line(tail[i].round(), tail[i + 1].round(), tail_color, 4)
 	draw_texture(surface, Vector2.ZERO)
-	_ear(face_anchor.x - 11)
-	_ear(face_anchor.x + 11)
-	# The face has its own pale patch, so it survives very thin / long shapes.
-	draw_rect(Rect2(face_anchor - Vector2(11, 6), Vector2(22, 13)), _fur_color() if water_mode else appearance.muzzle)
-	if appearance.striped:
-		for mark in range(-1, 2):
-			draw_line(face_anchor + Vector2(mark * 4, -9), face_anchor + Vector2(mark * 3, -6), appearance.stripe, 2)
-	if fmod(elapsed, 4.4) > 4.24:
-		draw_line(face_anchor + Vector2(-7, -1), face_anchor + Vector2(-4, -1), INK)
-		draw_line(face_anchor + Vector2(4, -1), face_anchor + Vector2(7, -1), INK)
-	else:
-		draw_texture(appearance.face, face_anchor - Vector2(10, 6))
 	if debug_particles:
 		for p in points:
 			draw_circle(p, 1, Color("de99a9"))
