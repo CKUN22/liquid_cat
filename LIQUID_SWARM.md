@@ -57,3 +57,7 @@ godot --headless --path . --script res://scripts/verify_cat_merge.gd
 原 `scripts/liquid_cat.gd` 与七房间实验室继续作为求解行为参考；刚体 `cat_crowd_lab.tscn` 是独立的早期试验。
 
 迁移前实现、说明及验证数据已保留在项目外的 `../gpt` 工作区供溯源。
+
+## 迁移性能实测
+
+2026-10-25 的同状态三轮对照显示：当前 GDScript 单猫及合并后耗时约为原 C# 的36–56倍；默认多线程的100只未合并猫为124–172倍。详见 [性能测试报告](PERFORMANCE_GD_MIGRATION.md)，包含P50/P95、物理与像素耗时、线程对照和缓冲大小。
