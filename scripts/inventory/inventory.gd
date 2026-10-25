@@ -107,6 +107,7 @@ func move_item(source: int, target: int) -> void:
 
 func _build_ui() -> void:
 	_overlay = Control.new()
+	_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(_overlay)
 	var backdrop := ColorRect.new()
@@ -133,7 +134,7 @@ func _build_ui() -> void:
 	title.add_theme_font_size_override("font_size", 16)
 	header.add_child(title)
 	_capacity = Label.new()
-	_capacity.add_theme_font_size_override("font_size", 12)
+	_capacity.add_theme_font_size_override("font_size", 16)
 	header.add_child(_capacity)
 	var close := Button.new()
 	close.text = "×"
@@ -150,7 +151,7 @@ func _build_ui() -> void:
 		button.custom_minimum_size = Vector2(46, 34)
 		button.expand_icon = true
 		button.add_theme_constant_override("icon_max_width", 24)
-		button.add_theme_font_size_override("font_size", 10)
+		button.add_theme_font_size_override("font_size", 16)
 		button.pressed.connect(func():
 			selected_index = i
 			_refresh())
@@ -159,11 +160,11 @@ func _build_ui() -> void:
 	_details = Label.new()
 	_details.custom_minimum_size = Vector2(296, 32)
 	_details.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_details.add_theme_font_size_override("font_size", 11)
+	_details.add_theme_font_size_override("font_size", 16)
 	column.add_child(_details)
 	var hint := Label.new()
 	hint.text = "拖动整理 / 同类堆叠    B 开关 · Esc 关闭"
-	hint.add_theme_font_size_override("font_size", 11)
+	hint.add_theme_font_size_override("font_size", 16)
 	column.add_child(hint)
 	_overlay.hide()
 	get_viewport().size_changed.connect(_layout_panel)
@@ -193,5 +194,7 @@ func _layout_panel() -> void:
 	_panel.size = minimum
 	# Preserve access to all slots and the close button in small game viewports.
 	var factor := minf(UI_SCALE, minf((available.x - 16.0) / minimum.x, (available.y - 16.0) / minimum.y))
+	if factor >= 1.0:
+		factor = floorf(factor)
 	_panel.scale = Vector2.ONE * maxf(factor, 0.1)
-	_panel.position = (available - _panel.size * _panel.scale) * 0.5
+	_panel.position = ((available - _panel.size * _panel.scale) * 0.5).floor()

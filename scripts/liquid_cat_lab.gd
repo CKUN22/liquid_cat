@@ -32,7 +32,7 @@ func _ready() -> void:
 	window.content_scale_stretch = Window.CONTENT_SCALE_STRETCH_INTEGER
 	window.size = Vector2i(1152, 720)
 	RenderingServer.set_default_clear_color(BG)
-	font = ThemeDB.fallback_font
+	font = preload("res://assets/fonts/unifont-16.0.04.ttf")
 	for i in ROOM_NAMES.size():
 		buttons.append(Rect2(228 + i * 34, 12, 31, 22))
 	for i in COATS.size():
