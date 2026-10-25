@@ -30,6 +30,7 @@ var body_sum := PackedInt32Array()
 var face_size := Vector2i(21, 13)
 var face_scale := 1.0
 var face_supported := false
+var _face_growth_at := 0.0
 var _face_texture: Texture2D
 var _face_image: Image
 var _body_bounds := Rect2i()
@@ -280,14 +281,16 @@ func _render_surface() -> void:
 	image.fill(Color.TRANSPARENT)
 	var lower := Vector2i(WIDTH - 1, HEIGHT - 1)
 	var upper := Vector2i.ZERO
+	var kernel_radius := 12 if water_mode else 9
+	var extent := kernel_radius + 1
 	for particle in points.size():
 		var p := points[particle]
 		var origin := Vector2i(p)
-		lower = lower.min(origin - Vector2i(10, 10))
-		upper = upper.max(origin + Vector2i(10, 10))
-		for y in range(maxi(0, origin.y - 9), mini(HEIGHT, origin.y + 10)):
-			for x in range(maxi(0, origin.x - 9), mini(WIDTH, origin.x + 10)):
-				var radius_squared := Vector2(x, y).distance_squared_to(p) / 81.0
+		lower = lower.min(origin - Vector2i(extent, extent))
+		upper = upper.max(origin + Vector2i(extent, extent))
+		for y in range(maxi(0, origin.y - kernel_radius), mini(HEIGHT, origin.y + extent)):
+			for x in range(maxi(0, origin.x - kernel_radius), mini(WIDTH, origin.x + extent)):
+				var radius_squared := Vector2(x, y).distance_squared_to(p) / float(kernel_radius * kernel_radius)
 				if radius_squared < 1:
 					var contribution := (1 - radius_squared) * (1 - radius_squared)
 					var cell := y * WIDTH + x
@@ -310,6 +313,8 @@ func _render_surface() -> void:
 			if in_solid:
 				continue
 			body_mask[index] = 1
+	if water_mode:
+		_fill_water_holes(lower, upper)
 	_select_face_anchor(lower, upper)
 	var base_color := _fur_color()
 	var shadow_color := _shade_color()
@@ -333,17 +338,45 @@ func _render_surface() -> void:
 					var face_distance := Vector2((x - face_anchor.x) / maxf(face_size.x * 0.65, 1), (y - face_anchor.y) / maxf(face_size.y * 0.8, 1)).length()
 					var marking := smoothstep(0.85, 1.35, face_distance) if face_supported else 1.0
 					color = color.lerp(appearance.stripe, marking * (0.35 if water_mode else 1.0))
-			if field[index - 1] < 0.58 or field[index + 1] < 0.58 or field[index - WIDTH] < 0.58 or field[index + WIDTH] < 0.58:
+			if body_mask[index - 1] == 0 or body_mask[index + 1] == 0 or body_mask[index - WIDTH] == 0 or body_mask[index + WIDTH] == 0:
 				color = INK
-			elif field[mini(field.size() - 1, index + WIDTH * 2)] < 0.58:
+			elif body_mask[mini(body_mask.size() - 1, index + WIDTH * 2)] == 0:
 				color = shadow_color
-			elif water_mode and field[maxi(0, index - WIDTH * 3)] < 0.58:
+			elif water_mode and body_mask[maxi(0, index - WIDTH * 3)] == 0:
 				color = Color("d8fbf4")
 			elif water_mode and posmod(x + int(elapsed * 10), 29) < 5 and posmod(y + int(sin(elapsed * 2) * 2), 11) == 0:
 				color = Color("b8f4ef")
 			image.set_pixel(x, y, color)
 	_paint_features()
 	surface.update(image)
+
+func _fill_water_holes(lower: Vector2i, upper: Vector2i) -> void:
+	var visited := body_mask.duplicate()
+	for y in range(lower.y, upper.y + 1):
+		for x in range(lower.x, upper.x + 1):
+			var seed := y * WIDTH + x
+			if visited[seed] != 0:
+				continue
+			var region := PackedInt32Array([seed])
+			visited[seed] = 2
+			var head := 0
+			var exterior := false
+			var solid := false
+			while head < region.size():
+				var cell := region[head]
+				head += 1
+				var pixel := Vector2i(cell % WIDTH, cell / WIDTH)
+				if pixel.x <= lower.x or pixel.y <= lower.y or pixel.x >= upper.x or pixel.y >= upper.y:
+					exterior = true
+					continue
+				solid = solid or _solid_pixel(pixel)
+				for neighbor in [cell - 1, cell + 1, cell - WIDTH, cell + WIDTH]:
+					if visited[neighbor] == 0:
+						visited[neighbor] = 2
+						region.append(neighbor)
+			if not exterior and not solid and region.size() <= 96:
+				for cell in region:
+					body_mask[cell] = 1
 
 func _face_rect(anchor: Vector2i, size: Vector2i, padding: int) -> Rect2i:
 	return Rect2i(anchor - Vector2i(size.x / 2, size.y / 2) - Vector2i.ONE * padding, size + Vector2i.ONE * padding * 2)
@@ -370,6 +403,8 @@ func _select_face_anchor(lower: Vector2i, upper: Vector2i) -> void:
 			body_sum[(y + 1) * (WIDTH + 1) + x + 1] = body_sum[y * (WIDTH + 1) + x + 1] + row
 	var remaining := body_mask.duplicate()
 	var largest := PackedInt32Array()
+	var tracking_cell := roundi(tracking_position.y) * WIDTH + roundi(tracking_position.x)
+	var tracking_component := false
 	for y in range(lower.y, upper.y + 1):
 		for x in range(lower.x, upper.x + 1):
 			var seed := y * WIDTH + x
@@ -385,14 +420,20 @@ func _select_face_anchor(lower: Vector2i, upper: Vector2i) -> void:
 					if remaining[neighbor] != 0:
 						remaining[neighbor] = 0
 						component.append(neighbor)
-			if component.size() > largest.size():
+			var contains_tracking := component.has(tracking_cell)
+			if contains_tracking or (not tracking_component and component.size() > largest.size()):
 				largest = component
+				tracking_component = contains_tracking
 	feature_mask.fill(0)
 	for cell in largest:
 		feature_mask[cell] = 1
+	var was_supported := face_supported
+	var previous_scale := face_scale
 	face_supported = false
 	# A shallow puddle needs a smaller face, not a detached rectangular head.
 	for scale_value in [1.0, 0.85, 0.7, 0.55, 0.4, 0.25, 0.16]:
+		if was_supported and scale_value > previous_scale and elapsed < _face_growth_at:
+			continue
 		var size := Vector2i(maxi(3, roundi(21 * scale_value)), maxi(2, roundi(13 * scale_value)))
 		var padding := 2 if scale_value >= 0.4 else 1
 		var best_score := INF
@@ -401,17 +442,34 @@ func _select_face_anchor(lower: Vector2i, upper: Vector2i) -> void:
 			var candidate := Vector2i(cell % WIDTH, cell / WIDTH)
 			if not _covered(_face_rect(candidate, size, padding)):
 				continue
-			var score := Vector2(candidate).distance_squared_to(center - Vector2(0, 3)) * 0.3 + Vector2(candidate).distance_squared_to(tracking_position) * 0.7
+			var travel := Vector2(candidate).distance_squared_to(tracking_position)
+			if travel > 9.0:
+				continue
+			if was_supported and scale_value > previous_scale and not _covered(_face_rect(candidate, size, padding + 2)):
+				continue
+			var score := Vector2(candidate).distance_squared_to(center - Vector2(0, 3)) * 0.05 + travel * 0.95
 			if score < best_score:
 				best_score = score
 				best = candidate
 		if best_score < INF:
+			if scale_value != previous_scale:
+				_face_growth_at = elapsed + 0.35
 			face_anchor = Vector2(best)
-			face_position = face_anchor
+			face_position = tracking_position.lerp(face_anchor, 0.35)
 			face_size = size
 			face_scale = scale_value
 			face_supported = true
 			return
+
+	var nearest := INF
+	var target := tracking_position
+	for cell in largest:
+		var candidate := Vector2(cell % WIDTH, cell / WIDTH)
+		var distance := candidate.distance_squared_to(tracking_position)
+		if distance < nearest:
+			nearest = distance
+			target = candidate
+	face_position = tracking_position + (target - tracking_position).limit_length(2.0)
 
 func _solid_pixel(pixel: Vector2i) -> bool:
 	for polygon in obstacles:
