@@ -3,4 +3,4 @@
 [ext_resource type="PackedScene" path="res://scenes/liquid_cat_lab.tscn" id="1"]
 
 [node name="CatFunnel" instance=ExtResource("1")]
-initial_layout = 5
+InitialLayout = 5

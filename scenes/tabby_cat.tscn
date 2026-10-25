@@ -1,7 +1,0 @@
-[gd_scene load_steps=3 format=3]
-
-[ext_resource type="PackedScene" path="res://scenes/liquid_cat.tscn" id="1"]
-[ext_resource type="Resource" path="res://assetsimagecat/tabby.tres" id="2"]
-
-[node name="TabbyCat" instance=ExtResource("1")]
-appearance = ExtResource("2")
